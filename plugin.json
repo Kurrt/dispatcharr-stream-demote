@@ -1,0 +1,569 @@
+{
+  "name": "Stream Demote",
+  "version": "0.3.0",
+  "description": "Moves streams that fail for real viewers down the channel's order, so the next tune-in starts on one that works, and keeps them there when other tools re-sort. Watching is passive and uses no provider seats. Includes a flag-as-bad API with its own narrow token, and optional content checks on streams a viewer already has open.",
+  "author": "Kurrt",
+  "license": "MIT",
+  "min_dispatcharr_version": "0.33.0",
+  "fields": [
+    {
+      "id": "_intro",
+      "label": "Start here",
+      "type": "info",
+      "help_text": "Dry run is on, so nothing moves until you turn it off. Read the journal first: Export journal shows what it would have done."
+    },
+    {
+      "id": "dry_run",
+      "label": "Dry run",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Log what it would do and change nothing, including restores and putting streams back after another tool. Undo buttons still work. Turn this off when the journal looks right."
+    },
+    {
+      "id": "_s1",
+      "label": "When a stream is demoted",
+      "type": "info",
+      "help_text": "A stream is demoted when its score reaches the level below, adding up failures over the window."
+    },
+    {
+      "id": "demote_score",
+      "label": "Score that demotes",
+      "type": "number",
+      "default": 1.0,
+      "help_text": "Raise it to 2 to need two hard failures."
+    },
+    {
+      "id": "score_window_hours",
+      "label": "Score window (hours)",
+      "type": "number",
+      "default": 24,
+      "help_text": "Failures older than this stop counting."
+    },
+    {
+      "id": "weight_hard",
+      "label": "Weight: hard failure",
+      "type": "number",
+      "default": 1.0,
+      "help_text": "Dispatcharr gave up after its retries (reason max_retries_exceeded), soon after the stream started. After the early period it counts as Weight: late stall."
+    },
+    {
+      "id": "weight_stall_early",
+      "label": "Weight: no data or early stall",
+      "type": "number",
+      "default": 1.0,
+      "help_text": "No data, or a stall soon after the stream started (reason health_monitor)."
+    },
+    {
+      "id": "weight_stall_late",
+      "label": "Weight: late failure",
+      "type": "number",
+      "default": 0.5,
+      "help_text": "A stall or hard failure after the early period. Long sessions hiccup, so it counts less."
+    },
+    {
+      "id": "weight_slow",
+      "label": "Weight: too slow",
+      "type": "number",
+      "default": 0.5,
+      "help_text": "Slower than real time for 15 s (reason buffering_timeout). FFmpeg profiles only."
+    },
+    {
+      "id": "early_minutes",
+      "label": "Early period (minutes)",
+      "type": "number",
+      "default": 5,
+      "help_text": "A stall inside this period counts as early."
+    },
+    {
+      "id": "hold_seconds",
+      "label": "Hold before acting (seconds)",
+      "type": "number",
+      "default": 45,
+      "help_text": "Wait this long before judging a failure, so an outage can show itself first."
+    },
+    {
+      "id": "proof_seconds",
+      "label": "Another stream must play (seconds)",
+      "type": "number",
+      "default": 10,
+      "help_text": "A stream only drops once another on the channel has delivered data for this long. Otherwise every stream may be bad."
+    },
+    {
+      "id": "proof_wait_seconds",
+      "label": "Wait for that proof (seconds)",
+      "type": "number",
+      "default": 300,
+      "help_text": "How long a running channel can take to show it. After this the failure still counts towards the score."
+    },
+    {
+      "id": "_s2",
+      "label": "Not over-reacting",
+      "type": "info",
+      "help_text": "These stop one bad evening rewriting your channels."
+    },
+    {
+      "id": "healthy_seconds",
+      "label": "Proof a provider is up (seconds)",
+      "type": "number",
+      "default": 30,
+      "help_text": "Another stream on the account that keeps playing this long proves the provider is up."
+    },
+    {
+      "id": "outage_streams",
+      "label": "Outage: failed streams",
+      "type": "number",
+      "default": 3,
+      "help_text": "This many failed streams on one account, on at least two channels, with nothing else playing there, is an outage."
+    },
+    {
+      "id": "outage_window_seconds",
+      "label": "Outage: window (seconds)",
+      "type": "number",
+      "default": 120,
+      "help_text": "Failures this far apart can count as one outage."
+    },
+    {
+      "id": "outage_pause_minutes",
+      "label": "Outage: pause (minutes)",
+      "type": "number",
+      "default": 30,
+      "help_text": "No demotions on that account for this long after an outage."
+    },
+    {
+      "id": "outage_giveup_hours",
+      "label": "Outage: give up after (hours)",
+      "type": "number",
+      "default": 24,
+      "help_text": "After this long the account counts as broken, not out, and demotions go ahead. 0 means never."
+    },
+    {
+      "id": "rollback_minutes",
+      "label": "Outage: undo recent (minutes)",
+      "type": "number",
+      "default": 10,
+      "help_text": "When an outage is seen, demotions made this recently on that account are undone."
+    },
+    {
+      "id": "chain_seconds",
+      "label": "Follow-on failure (seconds)",
+      "type": "number",
+      "default": 30,
+      "help_text": "Another stream on the account failing this close is treated as a possible outage until it happens again."
+    },
+    {
+      "id": "stall_guard_seconds",
+      "label": "Stall guard (seconds)",
+      "type": "number",
+      "default": 35,
+      "help_text": "Failures this soon after a stall on the account don't count: the old connection can still hold the seat."
+    },
+    {
+      "id": "zap_guard_seconds",
+      "label": "Zap guard (seconds)",
+      "type": "number",
+      "default": 10,
+      "help_text": "Failures on a stream tried this soon after another channel on the account stopped don't count, even with no limit set in Dispatcharr."
+    },
+    {
+      "id": "guard_repeat_limit",
+      "label": "Let off at most (spells)",
+      "type": "number",
+      "default": 3,
+      "help_text": "After failing this many separate times, 10 minutes or more apart, under those two guards, a stream's failure counts anyway. 0 means never."
+    },
+    {
+      "id": "channel_problem_minutes",
+      "label": "All streams failed (minutes)",
+      "type": "number",
+      "default": 60,
+      "help_text": "If every stream on a channel failed within this time, the order is left alone."
+    },
+    {
+      "id": "channel_burst_limit",
+      "label": "Limit: per channel in a burst",
+      "type": "number",
+      "default": 3,
+      "help_text": "Most demotions on one channel in the burst window."
+    },
+    {
+      "id": "channel_burst_minutes",
+      "label": "Limit: burst window (minutes)",
+      "type": "number",
+      "default": 5
+    },
+    {
+      "id": "channel_daily_limit",
+      "label": "Limit: per channel per day",
+      "type": "number",
+      "default": 6
+    },
+    {
+      "id": "global_hourly_limit",
+      "label": "Limit: everything per hour",
+      "type": "number",
+      "default": 20,
+      "help_text": "Above this it stops demoting and warns you."
+    },
+    {
+      "id": "excluded_channels",
+      "label": "Channels to leave alone",
+      "type": "string",
+      "default": "",
+      "help_text": "Comma-separated channel numbers. Nothing here moves their streams: no demotion, no second chance, no earning back and no putting back after another tool. Undo buttons still work."
+    },
+    {
+      "id": "_s3",
+      "label": "Earning its way back",
+      "type": "info"
+    },
+    {
+      "id": "earn_back_minutes",
+      "label": "Earn back by playing (minutes)",
+      "type": "number",
+      "default": 10,
+      "help_text": "A demoted stream that plays this long without failing goes back where it was."
+    },
+    {
+      "id": "parole_hours",
+      "label": "Second chance after (hours)",
+      "type": "number",
+      "default": 72,
+      "help_text": "A demoted stream goes back for another try after this long. The wait doubles each time it fails again. 0 means never."
+    },
+    {
+      "id": "_s6",
+      "label": "Other tools that sort streams",
+      "type": "info",
+      "help_text": "Tools such as Stream-Mapparr and Lineuparr rewrite a channel's order. This puts demoted streams back at the bottom afterwards, and leaves the rest of that tool's order alone. A hand reorder or an Undo sticks."
+    },
+    {
+      "id": "order_guard",
+      "label": "Keep demotions when other tools re-sort",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Compares channels with active demotions with how they were left."
+    },
+    {
+      "id": "order_guard_seconds",
+      "label": "Check every (seconds)",
+      "type": "number",
+      "default": 60
+    },
+    {
+      "id": "order_guard_settle_seconds",
+      "label": "Wait for it to settle (seconds)",
+      "type": "number",
+      "default": 10,
+      "help_text": "A changed order must hold still this long first, so a tool still working isn't raced."
+    },
+    {
+      "id": "order_guard_hourly_limit",
+      "label": "Most times per channel per hour",
+      "type": "number",
+      "default": 6,
+      "help_text": "Above this it stops on that channel for the hour and warns you, so two tools can't fight for ever."
+    },
+    {
+      "id": "order_guard_gone_minutes",
+      "label": "Forget a removed stream after (minutes)",
+      "type": "number",
+      "default": 10,
+      "help_text": "A demoted stream that has left the channel for this long is forgotten. If it comes back it starts clean."
+    },
+    {
+      "id": "_s7",
+      "label": "Content checks",
+      "type": "info",
+      "help_text": "Off by default. Looks at a few seconds of what Dispatcharr already holds for a stream a viewer has open, with ffmpeg, using no provider connection. See the README."
+    },
+    {
+      "id": "content_enabled",
+      "label": "Check content",
+      "type": "boolean",
+      "default": false,
+      "help_text": "The off switch for everything in this section."
+    },
+    {
+      "id": "content_black",
+      "label": "Black picture",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "id": "content_frozen",
+      "label": "Frozen picture",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "id": "content_silence",
+      "label": "Silence",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "id": "content_no_audio",
+      "label": "No audio track",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Channels with no video at all are radio, and are always skipped."
+    },
+    {
+      "id": "content_placeholder",
+      "label": "Placeholder pictures and files",
+      "type": "boolean",
+      "default": true,
+      "help_text": "A picture seen on several channels, or one you taught it, or a fixed-length file on an FFmpeg-style profile. Only picture fingerprints are kept."
+    },
+    {
+      "id": "content_looping",
+      "label": "Looping clips",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "id": "content_still_with_sound",
+      "label": "Count a still picture when there is sound",
+      "type": "boolean",
+      "default": true,
+      "help_text": "A black or frozen picture with sound playing has to last twice as long. Turn off to never count it, for channels that show a card over music."
+    },
+    {
+      "id": "content_act",
+      "label": "Act on content checks (experimental)",
+      "type": "boolean",
+      "default": false,
+      "help_text": "Off: a failed check is only written to the journal as content_failed. On: it counts as a failure and can move the viewer. Tests found good streams demoted, so read the README first."
+    },
+    {
+      "id": "content_rotate",
+      "label": "Move the viewer on",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Switch to the next stream when a check fails, if the viewer is still there."
+    },
+    {
+      "id": "content_sample_seconds",
+      "label": "Sample length (seconds)",
+      "type": "number",
+      "default": 6
+    },
+    {
+      "id": "content_first_seconds",
+      "label": "First sample after (seconds)",
+      "type": "number",
+      "default": 20
+    },
+    {
+      "id": "content_interval_seconds",
+      "label": "Sample every (seconds)",
+      "type": "number",
+      "default": 45
+    },
+    {
+      "id": "content_bad_samples",
+      "label": "Bad samples needed",
+      "type": "number",
+      "default": 3,
+      "help_text": "In a row. Never fewer than 2."
+    },
+    {
+      "id": "content_bad_span_seconds",
+      "label": "Over at least (seconds)",
+      "type": "number",
+      "default": 120,
+      "help_text": "So a dark scene or a quiet moment doesn't count."
+    },
+    {
+      "id": "content_max_at_once",
+      "label": "Most checks at once",
+      "type": "number",
+      "default": 1
+    },
+    {
+      "id": "content_timeout_seconds",
+      "label": "Give up on a check after (seconds)",
+      "type": "number",
+      "default": 20
+    },
+    {
+      "id": "content_rotate_hourly",
+      "label": "Most moves per hour, everywhere",
+      "type": "number",
+      "default": 6
+    },
+    {
+      "id": "content_shared_channels",
+      "label": "Placeholder: seen on this many channels",
+      "type": "number",
+      "default": 3
+    },
+    {
+      "id": "content_weight",
+      "label": "Weight: failed content check",
+      "type": "number",
+      "default": 1.0
+    },
+    {
+      "id": "teach_channel",
+      "label": "Teach from channel",
+      "type": "string",
+      "default": "",
+      "help_text": "Channel number used by the Teach a placeholder button. Someone must be watching it."
+    },
+    {
+      "id": "_s4",
+      "label": "Flag button",
+      "type": "info",
+      "help_text": "See the README before using these."
+    },
+    {
+      "id": "flag_rotate",
+      "label": "Move to the next stream on a flag",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Switch the running session to the next stream straight away, if a viewer is still there."
+    },
+    {
+      "id": "flag_channel_seconds",
+      "label": "Flag limit: per channel (seconds)",
+      "type": "number",
+      "default": 60,
+      "help_text": "One flag per channel in this time."
+    },
+    {
+      "id": "flag_token_hourly",
+      "label": "Flag limit: per token per hour",
+      "type": "number",
+      "default": 6
+    },
+    {
+      "id": "token_label",
+      "label": "Token label",
+      "type": "string",
+      "default": "",
+      "help_text": "Name for a new token, or the label to revoke, such as living-room-tv."
+    },
+    {
+      "id": "_s5",
+      "label": "Other",
+      "type": "info"
+    },
+    {
+      "id": "undo_channel",
+      "label": "Channel to undo",
+      "type": "string",
+      "default": "",
+      "help_text": "Channel number used by the Undo a channel button."
+    },
+    {
+      "id": "shared_event",
+      "label": "Write a shared event",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Adds a stream_demoted row to System Events, which a stats plugin can read."
+    },
+    {
+      "id": "journal_days",
+      "label": "Keep the journal (days)",
+      "type": "number",
+      "default": 90
+    }
+  ],
+  "actions": [
+    {
+      "id": "on_event",
+      "label": "Event handler",
+      "description": "Runs by itself on these events. The button does nothing.",
+      "events": [
+        "channel_start",
+        "stream_switch",
+        "channel_error",
+        "channel_stop",
+        "m3u_refresh"
+      ],
+      "button_label": "Idle",
+      "button_variant": "subtle"
+    },
+    {
+      "id": "status",
+      "label": "Status",
+      "description": "Mode, route and the last 24 hours.",
+      "button_label": "Show"
+    },
+    {
+      "id": "recent",
+      "label": "Export journal",
+      "description": "Writes every recent move to a CSV file and shows the last five.",
+      "button_label": "Export"
+    },
+    {
+      "id": "undo_last",
+      "label": "Undo the last demotion",
+      "button_label": "Undo",
+      "button_color": "orange"
+    },
+    {
+      "id": "undo_channel",
+      "label": "Undo a channel",
+      "description": "Reverses every demotion on the channel in Channel to undo.",
+      "button_label": "Undo",
+      "button_color": "orange"
+    },
+    {
+      "id": "undo_all",
+      "label": "Undo everything",
+      "description": "Reverses every demotion still in the journal.",
+      "button_label": "Undo all",
+      "button_color": "red",
+      "confirm": {
+        "required": true,
+        "title": "Undo every demotion?",
+        "message": "Every demoted stream goes back to where it was."
+      }
+    },
+    {
+      "id": "create_token",
+      "label": "Create a flag token",
+      "description": "Uses Token label. The token can only flag a channel that is playing.",
+      "button_label": "Create"
+    },
+    {
+      "id": "list_tokens",
+      "label": "List tokens",
+      "button_label": "List"
+    },
+    {
+      "id": "revoke_token",
+      "label": "Revoke a token",
+      "description": "Revokes the token named in Token label.",
+      "button_label": "Revoke",
+      "button_color": "orange"
+    },
+    {
+      "id": "teach_placeholder",
+      "label": "Teach a placeholder",
+      "description": "Remembers the still picture the channel in Teach from channel is showing now, as a fingerprint.",
+      "button_label": "Teach"
+    },
+    {
+      "id": "forget_placeholders",
+      "label": "Forget placeholders",
+      "description": "Forgets every remembered picture, taught or seen.",
+      "button_label": "Forget",
+      "button_color": "orange"
+    },
+    {
+      "id": "erase_data",
+      "label": "Erase plugin data",
+      "description": "Clears the journal, tokens and history. Leaves stream order alone.",
+      "button_label": "Erase",
+      "button_color": "red",
+      "confirm": {
+        "required": true,
+        "title": "Erase plugin data?",
+        "message": "Undo will no longer be possible for past demotions, and all tokens stop working."
+      }
+    }
+  ]
+}
