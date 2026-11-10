@@ -41,6 +41,7 @@ DEFAULTS = {
     "global_hourly_limit": 20,
     "earn_back_minutes": 10,
     "parole_hours": 72,
+    "flag_parole_hours": 168,
     "excluded_channels": "",
     "content_skip_channels": "",
     "order_guard": True,
@@ -70,6 +71,7 @@ DEFAULTS = {
     "content_weight": 1.0,
     "teach_channel": "",
     "flag_rotate": True,
+    "flag_weight": 2.0,
     "flag_channel_seconds": 60,
     "flag_token_hourly": 6,
     "shared_event": True,
@@ -79,6 +81,10 @@ DEFAULTS = {
 }
 
 PAROLE_CEILING_HOURS = 30 * 24
+# How long a stream's record of problems lasts, and how fast it fades. It only decides the order
+# of streams already demoted, so an old problem counts for less without vanishing overnight.
+RECORD_DAYS = 30
+RECORD_HALF_LIFE_DAYS = 7
 
 _TRUE_WORDS = ("1", "true", "yes", "on")
 _FALSE_WORDS = ("0", "false", "no", "off")
@@ -286,6 +292,25 @@ def demote_order(rows, stream_id):
     return rows
 
 
+def demote_ranked(rows, stream_id, below_ids):
+    """Demote one stream into its place among the demoted streams, leaving theirs alone.
+
+    below_ids are demoted streams with a worse record. The stream goes just above the first of
+    them, or to the bottom if there's none. The others keep whatever order they have, including
+    one a person gave them by hand. A stream already down there never moves up.
+    """
+    rows = list(rows)
+    target = next((row for row in rows if row[0] == stream_id), None)
+    if target is None or target[1]:
+        return rows
+    old_index = rows.index(target)
+    rows.remove(target)
+    anchor = next((index for index, row in enumerate(rows) if row[0] in below_ids), None)
+    index = _last_real_index(rows) + 1 if anchor is None else anchor
+    rows.insert(max(index, old_index), target)
+    return rows
+
+
 def restore_order(rows, stream_id, position):
     """Put a stream back at an earlier position, but never after a trailing custom stream."""
     rows = list(rows)
@@ -300,8 +325,8 @@ def restore_order(rows, stream_id, position):
 def reapply_order(rows, demoted_ids):
     """Put demoted streams back at the bottom after something else rewrote the order.
 
-    The other streams keep the order the other tool gave them. demoted_ids is oldest
-    demotion first, so the streams end up in the order they'd have by being demoted again.
+    The other streams keep the order the other tool gave them. demoted_ids is least bad first
+    (see least_bad_first), and the last one ends up at the very bottom.
     """
     for stream_id in demoted_ids:
         rows = demote_order(rows, stream_id)
@@ -331,6 +356,37 @@ def rotate_targets(order, current, skip):
     return [item for item in walk if item != current and item not in skip]
 
 
+def record_score(failures, now):
+    """A stream's record: each failure's weight, halving every RECORD_HALF_LIFE_DAYS.
+
+    failures is [{"at", "weight"}] from the last RECORD_DAYS.
+    """
+    half_life = RECORD_HALF_LIFE_DAYS * 86400
+    total = 0.0
+    for failure in failures:
+        age = max(0.0, now - failure["at"])
+        if age <= RECORD_DAYS * 86400:
+            total += float(failure["weight"] or 0.0) * 0.5 ** (age / half_life)
+    return total
+
+
+def least_bad_first(records, scores):
+    """The order demoted streams sit in at the bottom: the best of the bad ones on top.
+
+    records are demoted rows ({"stream_id", "strikes", "state_at"}), scores their record_score.
+    A lower record goes higher. On a tie, fewer demotions, then the older demotion, go higher,
+    which is the order they had before records existed.
+    """
+    return [
+        record["stream_id"]
+        for record in sorted(
+            records,
+            key=lambda record: (round(scores.get(record["stream_id"], 0.0), 6), int(record.get("strikes") or 0),
+                                float(record.get("state_at") or 0.0), record["stream_id"]),
+        )
+    ]
+
+
 def eligible_ids(rows):
     return [stream_id for stream_id, is_custom in rows if not is_custom]
 
@@ -340,15 +396,16 @@ def is_last_eligible(rows, stream_id):
     return bool(eligible) and eligible[-1] == stream_id
 
 
-def parole_at(demoted_at, strikes, cfg):
+def parole_at(demoted_at, strikes, cfg, flagged=False):
     """When a demoted stream gets another try, or None if parole is off.
 
     Each demotion doubles the wait, so a stream that keeps failing rarely costs a viewer
-    another slow start.
+    another slow start. A stream a person flagged starts from the longer flag wait.
     """
     if cfg.parole_hours <= 0:
         return None
-    hours = cfg.parole_hours * (2 ** max(int(strikes) - 1, 0))
+    base = max(cfg.parole_hours, cfg.flag_parole_hours) if flagged else cfg.parole_hours
+    hours = base * (2 ** max(int(strikes) - 1, 0))
     return demoted_at + min(hours, PAROLE_CEILING_HOURS) * 3600
 
 

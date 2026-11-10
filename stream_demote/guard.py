@@ -147,9 +147,15 @@ class OrderGuard:
         return keep
 
     def _forget(self, channel_id, stream_id, action, account_key, now, actor="guard"):
+        record_since = None
+        if action == "hand_release":
+            # A person lifting it means it shouldn't carry the record of that demotion.
+            record = self.store.demoted(channel_id, stream_id)
+            if record:
+                record_since = record["state_at"] - self.service.settings().score_window_hours * 3600
         self.store.forget_demoted(channel_id, stream_id)
         self.store.close_demote_rows(channel_id, stream_id, now)
-        self.store.void_strikes(channel_id, stream_id, action)
+        self.store.void_strikes(channel_id, stream_id, action, record_since=record_since)
         self.store.add_journal(now, action, channel_id, stream_id, account_key, actor=actor)
         logger.info("Stream %s on channel %s is no longer treated as demoted (%s)", stream_id, channel_id, action)
 
@@ -172,7 +178,8 @@ class OrderGuard:
     def _reapply(self, channel, records, links, cfg, now):
         channel_id = channel["id"]
         rows = [(item[0], item[2]) for item in links]
-        order = [record["stream_id"] for record in records]
+        kept = {record["stream_id"] for record in records}
+        order = [stream_id for stream_id in self.service.bottom_order(channel_id, now) if stream_id in kept]
         before = [item[0] for item in rows]
         after = [item[0] for item in engine.reapply_order(rows, order)]
         if after == before:

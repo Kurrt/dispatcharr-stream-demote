@@ -354,3 +354,44 @@ class SettingsParsing(unittest.TestCase):
 
         self.assertFalse(engine.in_channel_list({"number": 5.0}, "101, 9000-9999", boom))
         self.assertTrue(engine.in_channel_list({"number": 101.0}, "101, Soccer", boom))
+
+
+class Records(unittest.TestCase):
+    def test_a_record_halves_each_week_and_ends_after_thirty_days(self):
+        day = 86400
+        now = 100 * day
+        self.assertAlmostEqual(engine.record_score([{"at": now, "weight": 2}], now), 2.0)
+        self.assertAlmostEqual(engine.record_score([{"at": now - 7 * day, "weight": 2}], now), 1.0)
+        self.assertAlmostEqual(engine.record_score([{"at": now - 14 * day, "weight": 1}], now), 0.25)
+        self.assertEqual(engine.record_score([{"at": now - 31 * day, "weight": 5}], now), 0.0)
+
+    def test_the_old_record_still_counts_after_a_day(self):
+        # The 24 hour score is gone by now; the record isn't.
+        now = 10 * 86400
+        self.assertGreater(engine.record_score([{"at": now - 2 * 86400, "weight": 2}], now), 1.5)
+
+    def test_least_bad_first(self):
+        records = [
+            {"stream_id": 1, "strikes": 1, "state_at": 10},
+            {"stream_id": 2, "strikes": 1, "state_at": 20},
+            {"stream_id": 3, "strikes": 3, "state_at": 5},
+            {"stream_id": 4, "strikes": 1, "state_at": 1},
+        ]
+        scores = {1: 2.0, 2: 1.0, 3: 1.0, 4: 0.5}
+        self.assertEqual(engine.least_bad_first(records, scores), [4, 2, 3, 1])
+
+    def test_with_no_records_it_is_oldest_demotion_first(self):
+        records = [{"stream_id": 7, "strikes": 1, "state_at": 30}, {"stream_id": 8, "strikes": 1, "state_at": 10}]
+        self.assertEqual(engine.least_bad_first(records, {}), [8, 7])
+
+    def test_a_flagged_stream_waits_longer_for_a_second_chance(self):
+        cfg = Settings()
+        self.assertEqual(engine.parole_at(0, 1, cfg), 72 * 3600)
+        self.assertEqual(engine.parole_at(0, 1, cfg, flagged=True), 168 * 3600)
+        self.assertEqual(engine.parole_at(0, 2, cfg, flagged=True), 336 * 3600)
+        self.assertEqual(engine.parole_at(0, 9, cfg, flagged=True), 30 * 24 * 3600)
+
+    def test_the_flag_wait_is_never_shorter(self):
+        cfg = Settings({"parole_hours": 200, "flag_parole_hours": 24})
+        self.assertEqual(engine.parole_at(0, 1, cfg, flagged=True), 200 * 3600)
+        self.assertIsNone(engine.parole_at(0, 1, Settings({"parole_hours": 0}), flagged=True))

@@ -1265,3 +1265,183 @@ class WhenAChannelIsBusy(unittest.TestCase):
         self.w.clock.tick(15)
         self.w.service.sweep()
         self.assertEqual(self.w.order(1), [2, 3, 1])
+
+
+class LeastBadFirst(unittest.TestCase):
+    """Demoted streams sit at the bottom in order of their record: a flag weighs more than a failure."""
+
+    def setUp(self):
+        self.w = World()
+        self.w.dp.add_channel(1, 101, [(11, A), (12, A), (13, A), (14, A)])
+        self.token = self.w.make_token()
+
+    def flag(self):
+        return self.w.service.flag(f"Bearer {self.token}", {"channel_number": "101"})
+
+    def flag_11_then_fail_12(self):
+        self.w.start(1, 11)
+        self.assertEqual(self.flag()[1], {"result": "rotated"})
+        self.w.switch(1, 11, 12, reason="manual")  # what Dispatcharr reports after the move
+        self.assertEqual(self.w.order(1), [12, 13, 14, 11])
+        self.w.advance(600)
+        self.w.stop(1)
+        self.w.advance(60)
+        self.w.start(1, 12)
+        self.w.switch(1, 12, 13)
+        self.w.advance(47)
+
+    def test_a_flagged_stream_sinks_below_one_that_only_failed(self):
+        self.flag_11_then_fail_12()
+        self.assertEqual(self.w.order(1), [13, 14, 12, 11])
+
+    def test_it_still_holds_after_the_day_is_up(self):
+        self.flag_11_then_fail_12()
+        self.w.stop(1)
+        self.w.advance(2 * 86400)
+        self.w.tool_rewrites(1, [11, 12, 13, 14])
+        self.w.guard_passes()
+        self.assertEqual(self.w.order(1), [13, 14, 12, 11])
+
+    def test_with_like_records_the_newest_demotion_goes_last(self):
+        self.w.start(1, 11)
+        self.w.switch(1, 11, 12)
+        self.w.advance(47)
+        self.w.stop(1)
+        self.w.advance(600)
+        self.w.start(1, 12)
+        self.w.switch(1, 12, 13)
+        self.w.advance(47)
+        self.assertEqual(self.w.order(1), [13, 14, 11, 12])
+
+    def test_dry_run_writes_down_the_same_order(self):
+        self.w.dp.settings["dry_run"] = True
+        self.w.start(1, 11)
+        self.assertEqual(self.flag()[1], {"result": "observed"})
+        row = self.w.journal("would_demote")[0]
+        self.assertEqual(row["cause"], "flag")
+        self.assertEqual(row["after_order"], "[12, 13, 14, 11]")
+        self.assertEqual(self.w.order(1), [11, 12, 13, 14])
+        self.assertEqual(self.w.store.record_failures(1, [11], 0)[11], [], "dry run keeps no flag")
+
+    def test_a_flag_is_kept_in_the_record(self):
+        self.w.start(1, 11)
+        self.flag()
+        found = self.w.store.record_failures(1, [11], 0)[11]
+        self.assertEqual([(row["weight"]) for row in found], [2.0])
+
+    def test_undo_clears_the_record(self):
+        self.w.start(1, 11)
+        self.flag()
+        self.w.service.undo(limit=1)
+        self.assertEqual(self.w.store.record_failures(1, [11], 0)[11], [])
+
+    def test_earning_its_way_back_keeps_the_record(self):
+        self.w.start(1, 11)
+        self.w.switch(1, 11, 12)
+        self.w.advance(47)
+        self.w.stop(1)
+        self.w.advance(60)
+        self.w.start(1, 11)
+        self.w.advance(601)
+        self.w.stop(1)
+        self.assertIsNone(self.w.store.demoted(1, 11))
+        self.assertEqual(len(self.w.store.record_failures(1, [11], 0)[11]), 1)
+
+    def test_a_flagged_stream_waits_a_week_for_its_second_chance(self):
+        self.w.start(1, 11)
+        self.flag()
+        self.w.stop(1)
+        self.w.advance(100 * 3600)
+        self.w.store.release("sweep")
+        self.w.service.sweep()
+        self.assertEqual(self.w.order(1), [12, 13, 14, 11], "not after the usual 72 hours")
+        self.w.advance(70 * 3600)
+        self.w.store.release("sweep")
+        self.w.service.sweep()
+        self.assertEqual(self.w.order(1), [11, 12, 13, 14])
+        self.assertEqual(len(self.w.journal("restore_parole")), 1)
+
+    def test_a_flag_never_looks_like_a_provider_failing(self):
+        # The outage checks read the failure table, so a flag must stay out of it.
+        self.w.start(1, 11)
+        self.flag()
+        self.assertEqual(self.w.store._rows("SELECT * FROM plugin_stream_demote_failure"), [])
+        self.assertEqual(self.w.store.outage_spread(A, 0), (0, 0))
+
+    def test_erase_clears_flags_too(self):
+        self.w.start(1, 11)
+        self.flag()
+        self.w.store.erase()
+        self.assertEqual(self.w.store.record_failures(1, [11], 0)[11], [])
+
+    def test_a_hand_order_among_demoted_streams_survives_the_next_demotion(self):
+        self.w.dp.add_channel(2, 102, [(21, A), (22, A), (23, A), (24, A), (25, A)])
+        for stream_id in (21, 22):
+            self.w.start(2, stream_id)
+            self.w.switch(2, stream_id, stream_id + 1)
+            self.w.advance(47)
+            self.w.stop(2)
+            self.w.advance(600)
+        self.assertEqual(self.w.order(2), [23, 24, 25, 21, 22])
+        self.w.hand_order(2, [23, 24, 25, 22, 21])
+        self.w.guard_passes()
+        self.w.start(2, 23)
+        self.w.switch(2, 23, 24)
+        self.w.advance(47)
+        self.assertEqual(self.w.order(2), [24, 25, 22, 21, 23])
+
+    def test_a_flag_on_a_stream_already_down_there_never_lifts_it(self):
+        self.w.dp.add_channel(2, 102, [(21, A), (22, A), (23, A), (24, A)])
+        for stream_id in (21, 22):
+            self.w.start(2, stream_id)
+            self.w.switch(2, stream_id, stream_id + 1)
+            self.w.advance(47)
+            self.w.stop(2)
+            self.w.advance(600)
+        self.assertEqual(self.w.order(2), [23, 24, 21, 22])
+        # A person puts 21 last, then 22 picks up a heavy record: the bottom no longer matches the records.
+        self.w.hand_order(2, [23, 24, 22, 21])
+        self.w.guard_passes()
+        self.w.store.add_flag(self.w.clock.now, 2, 22, 5.0)
+        self.w.start(2, 21)
+        result = self.w.service.flag(f"Bearer {self.token}", {"channel_number": "102"})[1]["result"]
+        self.assertIn(result, ("rotated", "demoted"))
+        self.assertEqual(self.w.order(2), [23, 24, 22, 21], "21 has the lighter record, but a flag never lifts it")
+
+    def test_an_outage_rollback_keeps_the_flag(self):
+        self.w.start(1, 11)
+        self.flag()
+        self.w.service.undo(limit=1, action="rollback", actor="outage", automatic=True)
+        self.assertEqual([row["weight"] for row in self.w.store.record_failures(1, [11], 0)[11]], [2.0])
+
+    def test_undo_only_clears_what_led_to_that_demotion(self):
+        self.w.start(1, 11)
+        self.flag()
+        self.w.service.undo(limit=1)
+        self.w.switch(1, 12, 11, reason="manual")
+        self.w.advance(3 * 86400)
+        self.flag()
+        self.w.advance(60)
+        self.w.service.undo(limit=1)
+        self.assertEqual(self.w.store.record_failures(1, [11], 0)[11], [])
+        # An older flag than the undone demotion's day stays.
+        self.w.store.add_flag(self.w.clock.now - 5 * 86400, 1, 11, 2.0)
+        self.w.service.undo(limit=1)
+        self.assertEqual(len(self.w.store.record_failures(1, [11], 0)[11]), 1)
+
+    def test_a_flag_that_changed_nothing_isnt_kept(self):
+        self.w.start(1, 11)
+        self.w.dp.busy_writes = 1
+        self.assertEqual(self.flag()[1], {"result": "paused"})
+        self.assertEqual(self.w.store.record_failures(1, [11], 0)[11], [])
+
+    def test_a_later_failure_doesnt_cut_a_flagged_streams_wait(self):
+        self.w.start(1, 11)
+        self.flag()
+        self.w.stop(1)
+        # A later failure while still demoted names that failure as the cause, with a second strike.
+        self.w.store.mark_demoted(1, 11, A, self.w.clock.now, 0, "max_retries_exceeded")
+        self.w.advance(150 * 3600)
+        self.w.store.release("sweep")
+        self.w.service.sweep()
+        self.assertEqual(self.w.order(1)[-1], 11, "not after the 144 hours a failure would get")

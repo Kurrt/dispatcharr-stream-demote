@@ -10,7 +10,8 @@ from __future__ import annotations
 import json
 
 PREFIX = "plugin_stream_demote_"
-TABLE_NAMES = ("failure", "session", "demoted", "journal", "token", "rate", "account", "stop", "guard", "sample", "hash", "meta")
+TABLE_NAMES = ("failure", "session", "demoted", "journal", "token", "rate", "account", "stop", "guard", "sample", "hash",
+               "flag", "meta")
 
 SCORED_STATES = ("pending", "counted")
 DEMOTE_ACTIONS = ("demote", "would_demote")
@@ -66,6 +67,12 @@ def _schema(id_column):
         f"""CREATE TABLE IF NOT EXISTS {PREFIX}hash (
             picture TEXT NOT NULL, channel_id BIGINT NOT NULL, at DOUBLE PRECISION NOT NULL,
             taught INTEGER NOT NULL, PRIMARY KEY (picture, channel_id))""",
+        # Flags, for a stream's record only. Kept apart from failures, so a flag never looks like a
+        # provider failing to the outage checks.
+        f"""CREATE TABLE IF NOT EXISTS {PREFIX}flag (
+            id {id_column}, at DOUBLE PRECISION NOT NULL, channel_id BIGINT NOT NULL, stream_id BIGINT NOT NULL,
+            weight DOUBLE PRECISION NOT NULL, void INTEGER NOT NULL DEFAULT 0)""",
+        f"CREATE INDEX IF NOT EXISTS {PREFIX}flag_pair ON {PREFIX}flag (channel_id, stream_id, at)",
         f"""CREATE TABLE IF NOT EXISTS {PREFIX}meta (
             name TEXT PRIMARY KEY, value TEXT NOT NULL)""",
     )
@@ -253,8 +260,23 @@ class Store:
             (channel_id, stream_id, *SCORED_STATES),
         )
 
-    def void_strikes(self, channel_id, stream_id=None, outcome="void"):
+    def void_strikes(self, channel_id, stream_id=None, outcome="void", record_since=None):
+        """Stop failures counting. With record_since, the failures a demotion used and the flags
+        from that time on are cleared from the stream's record too: for when a person says the
+        demotion was wrong. Older history stays."""
         marks = ", ".join(["%s"] * len(SCORED_STATES))
+        if record_since is not None:
+            spent_sql = f"""UPDATE {PREFIX}failure SET state = 'void', outcome = %s
+                            WHERE channel_id = %s AND state = 'spent' AND at >= %s"""
+            flag_sql = f"UPDATE {PREFIX}flag SET void = 1 WHERE channel_id = %s AND at >= %s"
+            spent_params, flag_params = [outcome, channel_id, record_since], [channel_id, record_since]
+            if stream_id is not None:
+                spent_sql += " AND stream_id = %s"
+                flag_sql += " AND stream_id = %s"
+                spent_params.append(stream_id)
+                flag_params.append(stream_id)
+            self._exec(spent_sql, spent_params)
+            self._exec(flag_sql, flag_params)
         sql = f"""UPDATE {PREFIX}failure SET state = 'void', outcome = %s
                   WHERE channel_id = %s AND state IN ({marks})"""
         params = [outcome, channel_id, *SCORED_STATES]
@@ -270,6 +292,40 @@ class Store:
                 WHERE account_key = %s AND at >= %s AND state IN ({marks})""",
             (outcome, account_key, since, *SCORED_STATES),
         )
+
+    def add_flag(self, at, channel_id, stream_id, weight):
+        self._exec(
+            f"INSERT INTO {PREFIX}flag (at, channel_id, stream_id, weight, void) VALUES (%s, %s, %s, %s, 0)",
+            (at, channel_id, stream_id, weight),
+        )
+
+    def flagged_since(self, channel_id, stream_id, since):
+        return bool(self._value(
+            f"""SELECT COUNT(*) FROM {PREFIX}flag
+                WHERE channel_id = %s AND stream_id = %s AND at >= %s AND void = 0""",
+            (channel_id, stream_id, since),
+        ))
+
+    def record_failures(self, channel_id, stream_ids, since):
+        """What makes up each stream's record: failures counted or used by a demotion, and flags.
+        Nothing voided."""
+        if not stream_ids:
+            return {}
+        marks = ", ".join(["%s"] * len(stream_ids))
+        rows = self._rows(
+            f"""SELECT stream_id, at, weight FROM {PREFIX}failure
+                WHERE channel_id = %s AND stream_id IN ({marks}) AND at >= %s
+                AND state IN ('pending', 'counted', 'spent')""",
+            (channel_id, *stream_ids, since),
+        ) + self._rows(
+            f"""SELECT stream_id, at, weight FROM {PREFIX}flag
+                WHERE channel_id = %s AND stream_id IN ({marks}) AND at >= %s AND void = 0""",
+            (channel_id, *stream_ids, since),
+        )
+        found = {stream_id: [] for stream_id in stream_ids}
+        for row in rows:
+            found.setdefault(row["stream_id"], []).append(row)
+        return found
 
     def failed_streams_on_channel(self, channel_id, since):
         rows = self._rows(
@@ -731,7 +787,7 @@ class Store:
 
     def forget_install(self, at):
         """The plugin was removed and put back. Old tokens and demotions must not come back with it."""
-        for table in ("failure", "session", "demoted", "guard", "sample", "hash", "rate", "account", "stop"):
+        for table in ("failure", "session", "demoted", "guard", "sample", "hash", "rate", "account", "stop", "flag"):
             self._exec(f"DELETE FROM {PREFIX}{table}")
         self._exec(f"UPDATE {PREFIX}token SET revoked_at = %s WHERE revoked_at IS NULL", (at,))
         self._exec(f"UPDATE {PREFIX}journal SET undone_at = %s WHERE action = 'demote' AND undone_at IS NULL", (at,))
@@ -741,6 +797,7 @@ class Store:
     def prune(self, now, journal_days):
         self._exec(f"DELETE FROM {PREFIX}journal WHERE at < %s", (now - journal_days * 86400,))
         self._exec(f"DELETE FROM {PREFIX}failure WHERE at < %s", (now - 30 * 86400,))
+        self._exec(f"DELETE FROM {PREFIX}flag WHERE at < %s", (now - 30 * 86400,))
         self._exec(f"DELETE FROM {PREFIX}rate WHERE started < %s", (now - 7 * 86400,))
         self._exec(f"DELETE FROM {PREFIX}session WHERE since < %s", (now - 7 * 86400,))
         self._exec(f"DELETE FROM {PREFIX}stop WHERE at < %s", (now - 3600,))

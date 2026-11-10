@@ -506,13 +506,39 @@ class Service:
 
     # Moving streams
 
-    def _demote(self, channel, stream_id, key, cause, actor, cfg, now):
+    def bottom_order(self, channel_id, now, adding=None, extra_weight=0.0):
+        """Demoted streams on a channel, least bad first: the order they sit in at the bottom.
+
+        adding is a stream about to be demoted, counted as if it already were, with extra_weight
+        for a flag not written down yet.
+        """
+        records = list(self.store.demoted_on_channel(channel_id))
+        if adding is not None:
+            existing = next((record for record in records if record["stream_id"] == adding), None)
+            if existing is None:
+                old = self.store.demoted(channel_id, adding)
+                strikes = (int(old["strikes"]) if old else 0) + 1
+                records.append({"stream_id": adding, "strikes": strikes, "state_at": now})
+        ids = [record["stream_id"] for record in records]
+        failures = self.store.record_failures(channel_id, ids, now - engine.RECORD_DAYS * 86400)
+        scores = {stream_id: engine.record_score(failures.get(stream_id, []), now) for stream_id in ids}
+        if adding is not None:
+            scores[adding] = scores.get(adding, 0.0) + float(extra_weight or 0.0)
+        return engine.least_bad_first(records, scores)
+
+    def _worse_than(self, channel_id, stream_id, now, extra_weight=0.0):
+        """Demoted streams on this channel with a worse record than this one."""
+        ranked = self.bottom_order(channel_id, now, adding=stream_id, extra_weight=extra_weight)
+        return set(ranked[ranked.index(stream_id) + 1:])
+
+    def _demote(self, channel, stream_id, key, cause, actor, cfg, now, extra_weight=0.0):
         """Returns "demoted", "observed" or "no_change"."""
         channel_id = channel["id"]
         if cfg.dry_run:
             rows = self.dp.read_order(channel_id)
             before = [item[0] for item in rows]
-            after = [item[0] for item in engine.demote_order(rows, stream_id)]
+            below = self._worse_than(channel_id, stream_id, now, extra_weight)
+            after = [item[0] for item in engine.demote_ranked(rows, stream_id, below)]
             if before == after:
                 self.store.spend_strikes(channel_id, stream_id)
                 return "no_change"
@@ -523,7 +549,8 @@ class Service:
             return "observed"
         # If another tool has rewritten this channel, catch up first, or that gets lost here.
         self.guard.check_channel(channel_id, cfg, now, settle=False)
-        before, after = self.dp.apply_order(channel_id, lambda rows: engine.demote_order(rows, stream_id))
+        below = self._worse_than(channel_id, stream_id, now, extra_weight)
+        before, after = self.dp.apply_order(channel_id, lambda rows: engine.demote_ranked(rows, stream_id, below))
         if before == after:
             self.store.spend_strikes(channel_id, stream_id)
             return "no_change"
@@ -561,7 +588,9 @@ class Service:
 
     def _sweep_paroles(self, cfg, now):
         for record in self.store.demoted_rows("demoted"):
-            due = engine.parole_at(record["state_at"], record["strikes"], cfg)
+            flagged = record.get("cause") == engine.FLAG_CAUSE or self.store.flagged_since(
+                record["channel_id"], record["stream_id"], now - engine.RECORD_DAYS * 86400)
+            due = engine.parole_at(record["state_at"], record["strikes"], cfg, flagged=flagged)
             if due is None or now < due:
                 continue
             channel = self.dp.channel_by_id(record["channel_id"])
@@ -645,7 +674,10 @@ class Service:
                     moved += 1
             self.store.close_demote_rows(row["channel_id"], stream_id, now)
             self.store.forget_demoted(row["channel_id"], stream_id)
-            self.store.void_strikes(row["channel_id"], stream_id, action)
+            # A person's undo also clears what led to this demotion from the stream's record. An
+            # outage rollback doesn't: older history, and flags, weren't the provider's doing.
+            record_since = None if automatic else row["at"] - cfg.score_window_hours * 3600
+            self.store.void_strikes(row["channel_id"], stream_id, action, record_since=record_since)
             if channel:
                 self.guard.after_write(row["channel_id"], now)
         return moved
@@ -744,10 +776,15 @@ class Service:
             return "paused"
         stalled = live["last_data"] is None or now - live["last_data"] > STALLED_SECONDS
         try:
-            self._demote(channel, stream_id, info["account_key"], engine.FLAG_CAUSE, actor, cfg, now)
+            outcome = self._demote(channel, stream_id, info["account_key"], engine.FLAG_CAUSE, actor, cfg, now,
+                                   extra_weight=cfg.flag_weight)
         except OrderBusy:
             # Something else is rewriting this channel right now, so nothing was changed.
             return "paused"
+        if outcome in ("demoted", "no_change"):
+            # A person saw this, so it weighs more in the stream's record than a failure does.
+            # Not in dry run, where nothing may shape the real order later.
+            self.store.add_flag(now, channel["id"], stream_id, cfg.flag_weight)
         if cfg.dry_run:
             return "observed"
         if not cfg.flag_rotate:

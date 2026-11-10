@@ -18,7 +18,8 @@ Needs Dispatcharr 0.33.0. It has been tested on 0.33.0 only, with a fake provide
   stream gets a strike.
 - **Demotes.** Enough strikes, and once another stream on the channel has shown it can play,
   the stream moves to the bottom of the channel's order, above any custom stream such as a
-  fallback card.
+  fallback card. Demoted streams sit there least bad first, by their record. See
+  [Least bad first](#least-bad-first).
 - **Holds back when it isn't the stream's fault.** See [Not over-reacting](#not-over-reacting).
 - **Gives streams a way back.** See [Earning its way back](#earning-its-way-back).
 - **Keeps demotions when other tools re-sort.** See [Other tools](#other-tools).
@@ -100,6 +101,7 @@ a real provider.
 |---|---|---|
 | Earn back by playing | 10 minutes | A clean play this long returns it to its old place |
 | Second chance after | 72 hours | 0 means never. Doubles after each repeat failure, up to 30 days |
+| Second chance after a flag | 168 hours | The same, for a stream a person flagged. Never shorter than the one above |
 
 **Other tools that sort streams**
 
@@ -118,6 +120,7 @@ a real provider.
 | Setting | Default | Meaning |
 |---|---|---|
 | Move to the next stream on a flag | on | |
+| Weight: flag | 2 | How much a flag counts in a stream's record. A hard failure counts 1 |
 | Flag limit: per channel | 60 seconds | One flag per channel in this time |
 | Flag limit: per token | 6 an hour | Counts every call the token makes. See the note on gateways below |
 | Token label | | Name for a new token, or the label to revoke |
@@ -169,10 +172,34 @@ another stream could play.
 - **By playing.** If viewers land on a demoted stream, because the ones above it failed or are
   full, and it plays for 10 minutes without failing, it returns to its old place. If it was demoted
   by a content check and those are on, it also needs two good samples.
-- **By a second chance.** After 72 hours it goes back to its old place anyway. If it fails,
+- **By a second chance.** After 72 hours it goes back to its old place anyway, or after 7 days if a
+  person flagged it. If it fails,
   even with weak evidence, it's demoted again and the wait doubles. So a dead stream costs a
   viewer one slow start every so often, and never more than that. This is the only way a stream
   nobody lands on can be retried without opening it.
+
+## Least bad first
+
+Demoted streams sit at the bottom in order of their **record**: the one with the fewest and mildest
+problems goes highest, so if every stream on a channel is imperfect, the least bad is tried first.
+
+- **The record** adds up the failures that counted, and flags, over the last 30 days. Each one
+  halves in weight every 7 days, so an old problem counts for less without vanishing overnight. The
+  24 hour score still decides whether a stream is demoted at all; the record only decides the order.
+- **A flag weighs 2,** twice a hard failure, because a person saw it. Flags are kept apart from
+  failures, so a flag never looks like a provider outage.
+- **On a tie,** fewer demotions, then the older demotion, go higher. With no record at all, this is
+  the old order: oldest demotion first, newest at the very bottom.
+- **What clears it:** Undo, or a person lifting the stream by hand, clears what led to that demotion:
+  its failures and flags from the score window before it. Older history stays. An automatic outage
+  rollback clears nothing from the record, and earning its way back by playing doesn't either: if it
+  fails again soon, it goes back below the others.
+- **A newly demoted stream takes its place** among the demoted streams, just above the first one
+  with a worse record. The others keep the order they have, including one a person gave them by
+  hand, and a stream already down there never moves up. After another tool re-sorts the channel,
+  all the demoted streams go back in this order.
+- A stream with a flag in its record keeps the longer wait for its second chance, even if a later
+  failure demotes it again.
 
 ## Undo
 
@@ -196,7 +223,7 @@ the empty tables gone, run:
 DROP TABLE plugin_stream_demote_failure, plugin_stream_demote_session, plugin_stream_demote_demoted,
   plugin_stream_demote_journal, plugin_stream_demote_token, plugin_stream_demote_rate,
   plugin_stream_demote_account, plugin_stream_demote_guard, plugin_stream_demote_sample,
-  plugin_stream_demote_hash, plugin_stream_demote_meta;
+  plugin_stream_demote_hash, plugin_stream_demote_flag, plugin_stream_demote_meta;
 ```
 
 Copying a folder out by hand, with no use of the Plugins page, leaves Dispatcharr's record in place,
@@ -213,7 +240,7 @@ with no active demotion aren't looked at. A changed order has to hold still for 
 that's still working isn't raced. In testing a re-sort was put right in 13 to 88 seconds, and a viewer
 tuning in during that time can land on a demoted stream.
 
-**What it does.** Demoted streams go back to the bottom, oldest demotion first, above any custom stream.
+**What it does.** Demoted streams go back to the bottom, least bad first, above any custom stream.
 Everything else keeps the other tool's order. The place the tool gave a demoted stream becomes the place it
 goes back to when it earns its way back. Each of these is in the journal as `reapply`.
 

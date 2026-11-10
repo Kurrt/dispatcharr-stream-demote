@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0
+
+**New**
+
+- Least bad first: demoted streams sit at the bottom in order of their record, the failures and flags of the last 30
+  days, each halving every 7 days. The one with the fewest and mildest problems is tried first. Before, it was oldest
+  demotion first.
+- A flag counts 2 in that record (**Weight: flag**), and a flagged stream waits 7 days for its second chance
+  (**Second chance after a flag**) instead of 72 hours.
+- A newly demoted stream takes its place among the demoted streams by record. The others keep their order, including a
+  hand order, and a stream already at the bottom never moves up.
+- Undo, or lifting a stream by hand, also clears what led to that demotion from its record. An outage rollback doesn't.
+
 ## 0.4.0
 
 **Changed**
