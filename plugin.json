@@ -1,6 +1,6 @@
 {
   "name": "Stream Demote",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Moves streams that fail for real viewers down the channel's order, so the next tune-in starts on one that works, and keeps them there when other tools re-sort. Watching is passive and uses no provider seats. Includes a flag-as-bad API with its own narrow token, and optional content checks on streams a viewer already has open.",
   "author": "Kurrt",
   "license": "MIT",
@@ -209,7 +209,7 @@
       "label": "Channels to leave alone",
       "type": "string",
       "default": "",
-      "help_text": "Comma-separated channel numbers. Nothing here moves their streams: no demotion, no second chance, no earning back and no putting back after another tool. Undo buttons still work."
+      "help_text": "Comma-separated channel numbers, ranges such as 9000-9999, or channel group names. Nothing here moves their streams: no demotion, no second chance, no earning back and no putting back after another tool. Undo buttons still work."
     },
     {
       "id": "_s3",
@@ -282,6 +282,13 @@
       "type": "boolean",
       "default": false,
       "help_text": "The off switch for everything in this section."
+    },
+    {
+      "id": "content_skip_channels",
+      "label": "Skip content checks on",
+      "type": "string",
+      "default": "",
+      "help_text": "Channel numbers, ranges such as 9000-9999, or channel group names, comma-separated. For event and part-time channels that show a slate between events. Failures still count there as usual; only the picture and sound checks are skipped."
     },
     {
       "id": "content_black",

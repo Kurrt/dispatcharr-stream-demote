@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0
+
+**Changed**
+
+- A loop only counts while it keeps repeating: at least 6 repeats over at least 5 minutes, ending with the latest sample,
+  with no more than one new sample in a row between them. Before, repeats added up over the whole session, so the same
+  adverts in every break were taken for a looping clip.
+
+**New**
+
+- **Skip content checks on**: channel numbers, ranges or group names whose picture and sound aren't checked, for event and
+  part-time channels that show a slate between events. Failures there still count.
+- **Channels to leave alone** also takes ranges such as `9000-9999` and channel group names.
+
 ## 0.3.0
 
 **Changed**

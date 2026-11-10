@@ -133,8 +133,25 @@ class Pictures(unittest.TestCase):
 
     def test_loops_can_have_good_samples_between(self):
         cfg = Settings()
-        samples = [{"at": 1000 - index * 45, "looped": index % 2 == 0} for index in range(7)]
+        samples = [{"at": 1000 - index * 45, "looped": index % 2 == 0} for index in range(11)]
         self.assertEqual(engine.loop_verdict(samples, cfg), "looping")
+
+    def test_a_loop_must_outlast_an_advert_break(self):
+        cfg = Settings()
+        samples = [{"at": 1000 - index * 45, "looped": True} for index in range(5)]
+        self.assertIsNone(engine.loop_verdict(samples, cfg))
+
+    def test_repeats_split_by_new_pictures_dont_join_up(self):
+        # The same adverts in two breaks, with the programme between them.
+        cfg = Settings()
+        pattern = [True] * 4 + [False] * 2 + [True] * 4
+        samples = [{"at": 1000 - index * 45, "looped": hit} for index, hit in enumerate(pattern)]
+        self.assertIsNone(engine.loop_verdict(samples, cfg))
+
+    def test_only_a_run_that_is_still_going_counts(self):
+        cfg = Settings()
+        samples = [{"at": 1000 - index * 45, "looped": index > 0} for index in range(12)]
+        self.assertIsNone(engine.loop_verdict(samples, cfg))
 
     def test_one_repeat_is_not_a_loop(self):
         cfg = Settings()
@@ -314,3 +331,26 @@ class SettingsParsing(unittest.TestCase):
 
     def test_excluded_channels(self):
         self.assertEqual(Settings({"excluded_channels": "101, 7.5,x,"}).excluded_numbers(), {101.0, 7.5})
+
+    def test_channel_lists_take_ranges_and_groups(self):
+        numbers, ranges, groups = engine.parse_channel_list("101; 9000-9999 , 20 – 10, Basketball,,  NFL RedZone ")
+        self.assertEqual(numbers, {101.0})
+        self.assertEqual(ranges, [(9000.0, 9999.0), (10.0, 20.0)])
+        self.assertEqual(groups, {"basketball", "nfl redzone"})
+
+    def test_in_channel_list(self):
+        listed = engine.in_channel_list
+        self.assertTrue(listed({"number": 9042.0}, "9000-9999"))
+        self.assertTrue(listed({"number": 9000.0}, "9000-9999"))
+        self.assertFalse(listed({"number": 8999.0}, "9000-9999"))
+        self.assertTrue(listed({"number": 5.0}, "Soccer", lambda: "soccer "))
+        self.assertFalse(listed({"number": 5.0}, "Soccer", lambda: "Soccer Extra"))
+        self.assertFalse(listed({"number": 5.0}, "Soccer", lambda: None))
+        self.assertFalse(listed({"number": None}, "1-10"))
+
+    def test_the_group_is_only_looked_up_when_a_group_is_listed(self):
+        def boom():
+            raise AssertionError("looked up")
+
+        self.assertFalse(engine.in_channel_list({"number": 5.0}, "101, 9000-9999", boom))
+        self.assertTrue(engine.in_channel_list({"number": 101.0}, "101, Soccer", boom))

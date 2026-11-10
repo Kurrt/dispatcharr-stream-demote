@@ -73,6 +73,14 @@ class Dispatcharr:
         row = Channel.objects.with_effective_values().filter(pk=channel_id).first()
         return _channel_dict(row) if row else None
 
+    def group_name(self, group_id):
+        """A channel group's name, or None. Only read when a list in the settings names a group."""
+        if group_id is None:
+            return None
+        from apps.channels.models import ChannelGroup
+
+        return ChannelGroup.objects.filter(pk=group_id).values_list("name", flat=True).first()
+
     def channels_by_number(self, number):
         from apps.channels.models import Channel
 
@@ -480,4 +488,5 @@ def _channel_dict(row):
         "uuid": str(row.uuid),
         "number": float(number) if number is not None else None,
         "name": getattr(row, "effective_name", row.name),
+        "group_id": getattr(row, "effective_channel_group_id", getattr(row, "channel_group_id", None)),
     }

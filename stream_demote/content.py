@@ -82,7 +82,7 @@ class ContentChecker:
         if last_data is None or now - last_data > 10:
             return None
         channel = self.dp.channel_by_id(channel_id)
-        if not channel or self.service.excluded(channel, cfg):
+        if not channel or self.service.content_skipped(channel, cfg):
             return None
         info = self.dp.stream(stream_id)
         if not info or info["is_custom"]:

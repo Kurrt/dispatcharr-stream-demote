@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 # Reasons Dispatcharr gives when it moves off a stream because the stream failed.
@@ -41,6 +42,7 @@ DEFAULTS = {
     "earn_back_minutes": 10,
     "parole_hours": 72,
     "excluded_channels": "",
+    "content_skip_channels": "",
     "order_guard": True,
     "order_guard_seconds": 60,
     "order_guard_settle_seconds": 10,
@@ -97,17 +99,49 @@ class Settings:
         return max(self.hold_seconds, self.healthy_seconds)
 
     def excluded_numbers(self):
-        numbers = set()
-        for part in str(self.excluded_channels).replace(";", ",").split(","):
-            try:
-                numbers.add(float(part.strip()))
-            except ValueError:
-                continue
-        return numbers
+        return parse_channel_list(self.excluded_channels)[0]
 
     def content_needed(self):
         """How many bad samples, over how long, before a content failure counts. Never just one."""
         return max(2, int(self.content_bad_samples)), max(30.0, float(self.content_bad_span_seconds))
+
+
+_RANGE = re.compile(r"^(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)$")
+
+
+def parse_channel_list(text):
+    """A list such as "101, 9000-9999, Basketball": (numbers, ranges, group names).
+
+    Anything that isn't a number or a range of numbers is a channel group's name, matched
+    without regard to case.
+    """
+    numbers, ranges, groups = set(), [], set()
+    for part in str(text or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        found = _RANGE.match(part)
+        if found:
+            low, high = sorted((float(found.group(1)), float(found.group(2))))
+            ranges.append((low, high))
+            continue
+        try:
+            numbers.add(float(part))
+        except ValueError:
+            groups.add(part.casefold())
+    return numbers, ranges, groups
+
+
+def in_channel_list(channel, text, group_name=None):
+    """Is this channel in the list? group_name is called only when the list names a group."""
+    numbers, ranges, groups = parse_channel_list(text)
+    number = channel.get("number")
+    if number is not None and (number in numbers or any(low <= number <= high for low, high in ranges)):
+        return True
+    if groups and group_name is not None:
+        name = group_name()
+        return bool(name) and str(name).strip().casefold() in groups
+    return False
 
 
 def _coerce(value, default):
@@ -326,6 +360,10 @@ LOOP_BITS = 6
 DISTINCT_BITS = 10
 LOOP_MIN_FRAMES = 4
 LOOP_MIN_DISTINCT = 3
+# A loop has to keep repeating for longer than an advert break lasts.
+LOOP_RUN_MIN_HITS = 6
+LOOP_RUN_MIN_SECONDS = 300
+LOOP_RUN_GAP = 1
 FILE_CONTAINERS = ("mov", "matroska", "avi")
 # In the order they're reported. A black screen is also a still picture, so black comes first.
 PROBLEM_ORDER = ("black", "file", "placeholder", "frozen", "looping", "silence", "no_audio")
@@ -449,13 +487,29 @@ def content_verdict(samples, cfg, now):
 
 
 def loop_verdict(samples, cfg):
-    """A clip that keeps coming round is judged on how often it was seen again, not in a row.
+    """A clip going round shows nothing new for minutes on end. Adverts don't.
 
-    Samples land on a repeat only some of the time, so good samples in between are expected.
+    The same advert in every break is seen again too, but the programme between breaks is
+    new each time, so repeats only count while they keep coming: a run that ends with the
+    newest sample, with at most LOOP_RUN_GAP new samples in a row inside it (a sample can
+    land on frames of the clip not seen yet). The run needs twice the hits and twice the
+    time of other problems, and at least LOOP_RUN_MIN_HITS over LOOP_RUN_MIN_SECONDS, so it
+    outlasts an ordinary advert break.
     samples is newest first, each {"at", "looped"}.
     """
+    if not cfg.content_looping or not samples or not samples[0].get("looped"):
+        return None
     needed, span = cfg.content_needed()
-    hits = [sample for sample in samples if sample.get("looped")]
-    if cfg.content_looping and len(hits) >= needed and hits[0]["at"] - hits[-1]["at"] >= span:
+    want, wait = max(LOOP_RUN_MIN_HITS, needed * 2), max(LOOP_RUN_MIN_SECONDS, span * 2)
+    hits, misses = [], 0
+    for sample in samples:
+        if sample.get("looped"):
+            hits.append(sample)
+            misses = 0
+            continue
+        misses += 1
+        if misses > LOOP_RUN_GAP:
+            break
+    if len(hits) >= want and hits[0]["at"] - hits[-1]["at"] >= wait:
         return "looping"
     return None

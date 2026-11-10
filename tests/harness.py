@@ -77,11 +77,17 @@ class FakeDispatcharr:
         self.write_count = 0
         self.tool_probing = False
         self.busy_writes = 0
+        self.groups = {}
+        self.group_reads = 0
 
-    def add_channel(self, channel_id, number, streams):
+    def add_channel(self, channel_id, number, streams, group=None):
         """streams is a list of (stream_id, account key). Account None means a custom stream."""
         uuid = f"00000000-0000-0000-0000-{channel_id:012d}"
-        self.channels[channel_id] = {"id": channel_id, "uuid": uuid, "number": float(number), "name": f"Channel {number}"}
+        group_id = None
+        if group is not None:
+            group_id = self.groups.setdefault(group, len(self.groups) + 1)
+        self.channels[channel_id] = {"id": channel_id, "uuid": uuid, "number": float(number),
+                                     "name": f"Channel {number}", "group_id": group_id}
         order = []
         for stream_id, account in streams:
             self.streams.setdefault(stream_id, {"account_key": account, "is_custom": account is None})
@@ -105,6 +111,10 @@ class FakeDispatcharr:
 
     def channel_by_id(self, channel_id):
         return self.channels.get(channel_id)
+
+    def group_name(self, group_id):
+        self.group_reads += 1
+        return next((name for name, key in self.groups.items() if key == group_id), None)
 
     def channels_by_number(self, number):
         return [c for c in self.channels.values() if c["number"] == float(number)]

@@ -92,7 +92,7 @@ a real provider.
 | Let off at most | 3 spells | See below |
 | All streams failed | 60 minutes | If every stream failed in this time, the order is left alone |
 | Limits | 3 per channel in 5 minutes, 6 per channel a day, 20 an hour in all | Over the last one it stops and warns you in Dispatcharr's notifications |
-| Channels to leave alone | none | Comma-separated channel numbers. Nothing moves their streams: no demotion, no second chance, no earning back, no putting back after another tool, and no content checks |
+| Channels to leave alone | none | Comma-separated channel numbers, ranges such as `9000-9999`, or channel group names. Nothing moves their streams: no demotion, no second chance, no earning back, no putting back after another tool, and no content checks |
 
 **Earning its way back**
 
@@ -275,7 +275,7 @@ the file away. No picture, sound or address is stored: only 64-bit fingerprints,
 | Silence | `silencedetect` and `volumedetect`, both at or under -70 dB. Digital silence measures -91 dB, and the quietest real channel IPTV Checker measured was -44 dB |
 | No audio track | No audio stream, or no audio in it. Video with no audio |
 | Placeholder picture | The same still picture on streams of 3 different channels, or one you taught it |
-| Looping clip | The same run of different pictures, seen again at least 3 times over 2 minutes |
+| Looping clip | The same run of different pictures seen again, sample after sample: at least 6 repeats over at least 5 minutes, ending with the latest sample, with no more than one new sample in a row between them |
 | Fixed-length file | Only on FFmpeg-style profiles, which record the input's container: an MP4, MKV or AVI isn't live. A proxy profile can't see this, and a file that plays through and restarts shows up as looping instead |
 | Radio | No video track at all. **Skipped**, as IPTV Checker treats it, and not sampled again that session |
 
@@ -287,6 +287,10 @@ the file away. No picture, sound or address is stored: only 64-bit fingerprints,
 - A still only counts as seen on a channel if it holds through 3 samples in a row, over at least a minute, and a flat
   picture never does, so a programme's own black frames and passing slides teach nothing.
 - A talking head doesn't count as looping: the frames have to show several different pictures, in the same order.
+- The same adverts in every break don't count as looping: the programme between breaks is new, and that ends the run. Only a single
+  break of about 6 minutes or more, made entirely of adverts already shown in the last 15 minutes, could still be taken for one.
+- Event and part-time channels, such as Teamarr's or one that shows a slate between games, can be listed under
+  **Skip content checks on**, by number, range or group.
 - If every stream on a channel fails, nothing is demoted. The viewer stops being moved.
 - Anything it can't read gives no answer, and no answer does nothing: Redis failing, a chunk expiring mid-read,
   the stream changing mid-read, a sample that ffmpeg can't decode or that holds too little picture, or a run past the time limit.
@@ -309,7 +313,8 @@ In a second round of tests, with **Act on content checks** on and default settin
 - A sports channel showing a still slate before kick-off, silent or with music, where every stream carried the slate.
 - One news programme, a studio shot with a ticker, carried by 3 channels. It was learned as a shared placeholder.
 - A near-black scene with quiet talk lasting over about 4 minutes.
-- A programme with the same advert in every break, and one ordinary synthetic programme, both taken as looping.
+- A programme with the same advert in every break, and one ordinary synthetic programme, both taken as looping. Since 0.4.0
+  a loop has to keep repeating for at least 5 minutes, which a programme with adverts doesn't.
 
 All the video was synthetic, so real channels may do better or worse. A news ticker over a still picture, a slideshow
 with music, a quiet talk and near-silent hum didn't trigger. A placeholder with a slowly moving logo wasn't caught.
@@ -325,6 +330,7 @@ the flag is faster.
 | Setting | Default | Meaning |
 |---|---|---|
 | Check content | off | The off switch for all of this |
+| Skip content checks on | none | Channel numbers, ranges such as `9000-9999`, or channel group names. For event and part-time channels that show a slate between events. Failures still count there; only these checks are skipped |
 | Black picture, Frozen picture, Silence, No audio track, Placeholder pictures and files, Looping clips | on | Each one alone |
 | Count a still picture when there is sound | on | See above |
 | Act on content checks (experimental) | off | Off: failed checks are only written to the journal. See [Known false alarms](#known-false-alarms) |
@@ -562,7 +568,7 @@ didn't count and one after it did. Its results and its writes to `stream_stats` 
 | Frozen with sound | `content_frozen` | 404 s |
 | One slate, encoded four ways, on four channels at once | `content_placeholder` | 372 to 448 s |
 | The same slate on a later channel | `content_placeholder` | 141 s |
-| A 24 second clip going round | `content_looping` | 292 s |
+| A 24 second clip going round | `content_looping` | 292 s (before 0.4.0; the unit-test version now takes about 390 s) |
 | An MP4 on an FFmpeg-style profile | `content_file` | 164 s |
 | Every stream on a channel black | Viewer moved twice, then left. Nothing demoted | |
 | **A 150 second near-black scene over quiet talk, then a 15 second blackout with silence** | **Nothing.** Seen as dark 3 times in a row, and let be | |

@@ -71,6 +71,39 @@ class WhatGetsChecked(Base):
         self.watch(300)
         self.assertEqual(self.w.sample_calls, 0)
 
+    def test_not_on_a_range_to_skip(self):
+        self.w.dp.settings["content_skip_channels"] = "100-199"
+        self.w.start(1, 11)
+        self.watch(300)
+        self.assertEqual(self.w.sample_calls, 0)
+
+    def test_not_on_a_group_to_skip_but_still_elsewhere(self):
+        self.w.dp.add_channel(3, 9042, [(31, A), (32, B)], group="Soccer")
+        self.w.dp.samples[31] = b"s31"
+        self.w.dp.settings["content_skip_channels"] = "soccer"
+        self.w.start(3, 31)
+        self.watch(300)
+        self.assertEqual(self.w.sample_calls, 0)
+        self.w.stop(3)
+        self.w.start(1, 11)
+        self.watch(300)
+        self.assertGreater(self.w.sample_calls, 0)
+
+    def test_failures_still_count_where_checks_are_skipped(self):
+        self.w.dp.settings["content_skip_channels"] = "101"
+        self.w.start(1, 11)
+        self.w.switch(1, 11, 12)
+        self.watch(600)
+        self.assertEqual(self.w.order(1)[-1], 11)
+
+    def test_a_group_to_leave_alone(self):
+        self.w.dp.add_channel(3, 9042, [(31, A), (32, B)], group="Soccer")
+        self.w.dp.samples[31] = b"s31"
+        self.w.dp.settings["excluded_channels"] = "Soccer"
+        self.w.start(3, 31)
+        self.watch(300)
+        self.assertEqual(self.w.sample_calls, 0)
+
     def test_not_with_only_one_stream(self):
         self.w.dp.add_channel(2, 102, [(21, A)])
         self.w.start(2, 21)
@@ -437,6 +470,54 @@ class Looping(Base):
         self.w.start(1, 11)
         self.watch(900)
         self.assertEqual(self.failures(), [])
+
+    def ad_breaks(self, programme_samples=11, break_samples=4):
+        """A programme with the same adverts in every break: each break shows the same reel again."""
+        reel = [self.clip(offset, period=97) for offset in range(0, 16 * break_samples, 16)]
+        count = iter(range(100000))
+
+        def answer(_n):
+            index = next(count)
+            spot = index % (programme_samples + break_samples)
+            if spot < programme_samples:
+                return sample_result(hashes=moving_hashes(1000 + index))
+            return sample_result(hashes=reel[spot - programme_samples])
+
+        return answer
+
+    def looping_rows(self):
+        return [row for row in self.failures() if row["cause"] == "content_looping"]
+
+    def test_the_same_adverts_in_every_break_do_not(self):
+        self.w.sample_for[b"s11"] = self.ad_breaks()
+        self.w.start(1, 11)
+        self.watch(3600)
+        self.assertEqual(self.looping_rows(), [])
+        # They are still seen again, so the rule, not the matching, is what keeps them out.
+        self.assertTrue(any(row["looped"] for row in self.w.store._rows(
+            "SELECT looped FROM plugin_stream_demote_sample")))
+
+    def test_short_breaks_close_together_do_not_either(self):
+        self.w.sample_for[b"s11"] = self.ad_breaks(programme_samples=3, break_samples=3)
+        self.w.start(1, 11)
+        self.watch(3600)
+        self.assertEqual(self.looping_rows(), [])
+
+    def test_a_clip_missed_now_and_then_still_counts(self):
+        # A sample can land on frames not seen yet, even on a loop, so one miss between repeats is allowed.
+        offsets = iter(range(0, 2400, 7))
+        count = iter(range(100000))
+
+        def answer(_n):
+            index = next(count)
+            if index % 4 == 3:
+                return sample_result(hashes=moving_hashes(5000 + index))
+            return sample_result(hashes=self.clip(next(offsets)))
+
+        self.w.sample_for[b"s11"] = answer
+        self.w.start(1, 11)
+        self.watch(900)
+        self.assertEqual(self.failures()[0]["cause"], "content_looping")
 
     def test_it_can_be_turned_off(self):
         self.w.dp.settings["content_looping"] = False

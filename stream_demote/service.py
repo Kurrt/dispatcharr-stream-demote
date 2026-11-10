@@ -93,7 +93,19 @@ class Service:
         self.store.set_meta("install_id", current)
 
     def excluded(self, channel, cfg):
-        return channel.get("number") in cfg.excluded_numbers()
+        return engine.in_channel_list(channel, cfg.excluded_channels, lambda: self._group_name(channel))
+
+    def content_skipped(self, channel, cfg):
+        """Left alone, or listed under Skip content checks on, such as event channels with slates."""
+        return self.excluded(channel, cfg) or engine.in_channel_list(
+            channel, cfg.content_skip_channels, lambda: self._group_name(channel))
+
+    def _group_name(self, channel):
+        try:
+            return self.dp.group_name(channel.get("group_id"))
+        except Exception as error:
+            self.note_problem("group lookup", error)
+            return None
 
     def warn(self, key, title, message):
         logger.warning(message)
