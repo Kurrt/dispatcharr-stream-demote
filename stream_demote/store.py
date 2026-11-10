@@ -686,6 +686,15 @@ class Store:
         )
         return {row["stream_id"] for row in rows}
 
+    def journal_seen(self, action, channel_id, stream_id, cause, since):
+        return bool(
+            self._value(
+                f"""SELECT COUNT(*) FROM {PREFIX}journal WHERE action = %s AND channel_id = %s AND stream_id = %s
+                    AND cause = %s AND at >= %s""",
+                (action, channel_id, stream_id, cause, since),
+            )
+        )
+
     def journal_counts(self, since):
         rows = self._rows(
             f"SELECT action, COUNT(*) AS n FROM {PREFIX}journal WHERE at >= %s GROUP BY action",

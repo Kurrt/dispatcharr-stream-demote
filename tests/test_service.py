@@ -1445,3 +1445,50 @@ class LeastBadFirst(unittest.TestCase):
         self.w.store.release("sweep")
         self.w.service.sweep()
         self.assertEqual(self.w.order(1)[-1], 11, "not after the 144 hours a failure would get")
+
+
+class CantSeeWhatsPlaying(unittest.TestCase):
+    """A Dispatcharr update that moves its live data must not leave Status saying all is well."""
+
+    def setUp(self):
+        self.w = World()
+        for number in range(1, 6):
+            self.w.dp.add_channel(number, 100 + number, [(number * 10 + 1, A), (number * 10 + 2, B)])
+
+    def run_for(self, seconds):
+        for _ in range(int(seconds // 15)):
+            self.w.tick(15)
+
+    def test_status_says_so(self):
+        self.assertTrue(self.w.service.status(True)["live_data_visible"])
+        self.w.dp.live_hidden = True
+        for number in (1, 2, 3):
+            self.w.start(number, number * 10 + 1)
+            self.run_for(120)
+        status = self.w.service.status(True)
+        self.assertFalse(status["live_data_visible"])
+        self.assertTrue(status["message"].startswith("Something is wrong"))
+        self.assertEqual(len(self.w.dp.notices), 1)
+        self.run_for(1800)
+        self.assertEqual(len(self.w.dp.notices), 1, "one notice, not one a tick")
+
+    def test_one_stale_session_is_not_enough(self):
+        self.w.start(1, 11)
+        # Its stop event never arrived.
+        self.w.dp.running.pop(self.w.dp.channels[1]["uuid"])
+        self.run_for(3600)
+        self.assertTrue(self.w.service.status(True)["live_data_visible"])
+        self.assertEqual(self.w.dp.notices, [])
+
+    def test_a_channel_seen_playing_clears_it(self):
+        self.w.dp.live_hidden = True
+        for number in (1, 2, 3):
+            self.w.start(number, number * 10 + 1)
+            self.run_for(120)
+        self.assertFalse(self.w.service.status(True)["live_data_visible"])
+        self.w.dp.live_hidden = False
+        self.w.start(4, 41)
+        self.run_for(120)
+        status = self.w.service.status(True)
+        self.assertTrue(status["live_data_visible"])
+        self.assertFalse(status["message"].startswith("Something is wrong"))

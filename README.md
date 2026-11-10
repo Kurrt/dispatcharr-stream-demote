@@ -242,7 +242,8 @@ tuning in during that time can land on a demoted stream.
 
 **What it does.** Demoted streams go back to the bottom, least bad first, above any custom stream.
 Everything else keeps the other tool's order. The place the tool gave a demoted stream becomes the place it
-goes back to when it earns its way back. Each of these is in the journal as `reapply`.
+goes back to when it earns its way back. Each of these is in the journal as `reapply`. If two of Dispatcharr's
+workers put the same channel right at once, the second finds nothing left to do and writes nothing.
 
 **Who did it.** It tells a person's change from a tool's by how the change was made:
 
@@ -261,6 +262,12 @@ channel serializer, added when the plugin loads. That isn't a supported plugin f
 future Dispatcharr. If it can't be added, Status says so, and any change that keeps the rows counts as by hand,
 so the plugin leaves it alone rather than fight you. A later Dispatcharr could also save channels some other way,
 which Status can't see. Your drag would then look like a tool's and be put back, so check after an upgrade.
+
+**After a Dispatcharr update.** What's playing is read from Dispatcharr's live channel data in Redis, by the names
+Dispatcharr's own code gives its keys, so a rename there is followed. If the data moves some other way, every channel
+would look idle and the plugin would quietly do nothing. So it checks that channels Dispatcharr reports starting show
+up there a minute or so later. If three in a row don't, with none seen in between, Status starts with "Something is
+wrong" and a notice says so. Right after a restart this can be a false alarm, and it clears once a channel is seen playing.
 
 **Limits.** No loops: what it writes becomes what it expects, so it doesn't answer its own writes. If something keeps rewriting a channel, it answers 6 times in an hour there, then stops for the rest
 of that hour and warns you. In Dry run it writes `would_reapply` and moves nothing. Under **Channels to leave
@@ -323,6 +330,7 @@ the file away. No picture, sound or address is stored: only 64-bit fingerprints,
   the stream changing mid-read, a sample that ffmpeg can't decode or that holds too little picture, or a run past the time limit.
 
 **When a check fails.** It's written to the journal as `content_failed`, with the cause. With **Act on content checks**
+off, checks carry on while the viewer stays, but each cause is written once per viewing, not once a minute. With it
 on, it also counts like any other failure, as `content_black`, `content_silence` and so on. The viewer
 moves to the next stream, if they're still there, and only within the limits. Then, if the next stream gives a good
 sample, the failed one is demoted. If the viewer couldn't be moved there's nothing to compare with, so it's

@@ -678,3 +678,29 @@ class Storage(Base):
         self.assertTrue(content["enabled"])
         self.assertGreater(content["samples_24h"], 0)
         self.assertEqual(content["average_cpu_seconds"], 0.1)
+
+
+class ReportOnlyRows(Base):
+    settings = {"content_enabled": True, "content_act": False}
+
+    def test_one_problem_is_one_row_per_viewing(self):
+        self.shows(11, **BLACK)
+        self.w.start(1, 11)
+        self.watch(900)
+        self.assertEqual(len(self.w.journal("content_failed")), 1, "not one a minute")
+        self.assertGreater(len(self.w.store._rows("SELECT id FROM plugin_stream_demote_sample")), 5, "it keeps sampling")
+        self.w.stop(1)
+        self.w.advance(60)
+        self.w.start(1, 11)
+        self.watch(900)
+        self.assertEqual(len(self.w.journal("content_failed")), 2, "a new viewing is a new row")
+
+    def test_a_different_problem_still_gets_its_row(self):
+        self.shows(11, **BLACK)
+        self.w.start(1, 11)
+        self.watch(600)
+        self.shows(11, black=False, frozen=True, silent=True, audible=False, mean_db=-91.0, hashes=still_hashes())
+        self.watch(900)
+        causes = [row["cause"] for row in self.w.journal("content_failed")]
+        self.assertEqual(causes.count("content_black"), 1)
+        self.assertEqual(len(causes), len(set(causes)), "each cause once")

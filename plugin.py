@@ -75,7 +75,7 @@ if __package__:
 
 class Plugin:
     name = "Stream Demote"
-    version = "0.5.0"
+    version = "0.5.1"
     description = "Moves streams that fail for real viewers down the channel's order, and keeps them there when other tools re-sort."
 
     def stop(self, context=None):

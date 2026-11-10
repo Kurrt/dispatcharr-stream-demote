@@ -1,6 +1,6 @@
 {
   "name": "Stream Demote",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Moves streams that fail for real viewers down the channel's order, so the next tune-in starts on one that works, and keeps them there when other tools re-sort. Watching is passive and uses no provider seats. Includes a flag-as-bad API with its own narrow token, and optional content checks on streams a viewer already has open.",
   "author": "Kurrt",
   "license": "MIT",

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.1
+
+**Fixed**
+
+- Status could say all was well while the plugin saw nothing playing, if a Dispatcharr update moved its live channel
+  data. It now checks that channels Dispatcharr starts show up there, says "Something is wrong" when three in a row
+  don't, and sends a notice. Key names now come from Dispatcharr's own code where it has them.
+- With content checks only reporting, the same problem was written to the journal once a minute. It's now once per cause
+  per viewing.
+- Two workers putting the same channel right at once could log it twice, spend two of the hourly re-applies, and send a
+  demoted stream back to the bottom instead of where the other tool had put it when it earned its way back.
+
 ## 0.5.0
 
 **New**

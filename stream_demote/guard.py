@@ -191,8 +191,7 @@ class OrderGuard:
                 self.store.add_journal(now, "would_reapply", channel_id, cause="order_rewritten", actor="guard",
                                        before=before, after=after)
             return
-        hits, _wait = self.store.hit(f"guard:{channel_id}", now, 3600)
-        if hits > cfg.order_guard_hourly_limit:
+        if self.store.hits_now(f"guard:{channel_id}", now, 3600) >= cfg.order_guard_hourly_limit:
             if self.store.once_every(f"guard_stop:{channel_id}", now, 3600):
                 self.store.add_journal(now, "guard_stop", channel_id, cause="order_rewritten", actor="guard")
                 self.service.warn(
@@ -207,6 +206,11 @@ class OrderGuard:
         except OrderBusy:
             # Something is still writing here. The next look will catch it.
             return
+        if after == before:
+            # Another runner put it right a moment ago. Its places to return to stand.
+            self.after_write(channel_id, now)
+            return
+        self.store.hit(f"guard:{channel_id}", now, 3600)
         for stream_id in order:
             if stream_id in before:
                 self.store.set_position(channel_id, stream_id, before.index(stream_id))

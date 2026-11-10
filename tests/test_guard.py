@@ -367,3 +367,21 @@ class TheHandEditMark(unittest.TestCase):
         self.assertEqual(_parse_hand_edit(b"1700000000.25"), {"at": 1700000000.25, "order": None}, "an older version's")
         for bad in (None, b"", b"nonsense", b'{"at": "x"}', b'{"at": 1}', b"[1, 2]"):
             self.assertIsNone(_parse_hand_edit(bad), bad)
+
+
+class TwoRunners(Base):
+    def test_a_second_runner_on_the_same_reads_changes_nothing(self):
+        # An event in one worker and the background loop in another can both get here.
+        self.w.tool_rewrites(1, [11, 12, 13, 14])
+        guard = self.w.service.guard
+        cfg = self.w.service.settings()
+        now = self.w.clock.now
+        channel = self.w.dp.channel_by_id(1)
+        records = self.w.store.demoted_on_channel(1)
+        links = self.w.dp.read_links([1])[1]
+        guard._reapply(channel, records, links, cfg, now)
+        guard._reapply(channel, records, links, cfg, now)
+        self.assertEqual(self.w.order(1), [12, 13, 14, 11])
+        self.assertEqual(len(self.w.journal("reapply")), 1)
+        self.assertEqual(self.w.store.demoted(1, 11)["from_position"], 0, "where the tool put it, not the bottom")
+        self.assertEqual(self.w.store.hits_now("guard:1", now, 3600), 1, "one write counts once")

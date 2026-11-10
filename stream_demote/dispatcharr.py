@@ -33,6 +33,39 @@ _PROBE_MARKERS = (
 )
 
 
+def _live_key(name, channel_uuid, *args):
+    """A key in Dispatcharr's live channel data, named the way Dispatcharr itself names it.
+
+    Dispatcharr has renamed these keys before. Asking its own helper follows a rename, and
+    the names below are what 0.33 uses, for when the helper isn't there.
+    """
+    try:
+        return getattr(_redis_keys(), name)(channel_uuid, *args)
+    except Exception:
+        return _LIVE_KEYS[name](channel_uuid, *args)
+
+
+@functools.lru_cache(maxsize=1)
+def _redis_keys():
+    # Looked up once, so a Dispatcharr without it doesn't pay for a failed import on every read.
+    try:
+        from apps.proxy.live_proxy.redis_keys import RedisKeys
+
+        return RedisKeys
+    except Exception:
+        return None
+
+
+_LIVE_KEYS = {
+    "channel_metadata": lambda channel: f"live:channel:{channel}:metadata",
+    "clients": lambda channel: f"live:channel:{channel}:clients",
+    "last_data": lambda channel: f"live:channel:{channel}:last_data",
+    "chunk_timestamps": lambda channel: f"live:channel:{channel}:input:buffer:chunk_timestamps",
+    "buffer_discontinuities": lambda channel: f"live:channel:{channel}:input:buffer:discontinuities",
+    "buffer_chunk": lambda channel, index: f"live:channel:{channel}:input:buffer:chunk:{index}",
+}
+
+
 class OrderBusy(Exception):
     """Another writer kept hold of a channel's rows for longer than it's worth waiting."""
 
@@ -192,9 +225,10 @@ class Dispatcharr:
             if not client:
                 return None
             pipe = client.pipeline(transaction=False)
-            pipe.hmget(f"live:channel:{channel_uuid}:metadata", ["stream_id", "state", "stream_type", "video_codec", "audio_codec"])
-            pipe.scard(f"live:channel:{channel_uuid}:clients")
-            pipe.get(f"live:channel:{channel_uuid}:last_data")
+            pipe.hmget(_live_key("channel_metadata", channel_uuid),
+                       ["stream_id", "state", "stream_type", "video_codec", "audio_codec"])
+            pipe.scard(_live_key("clients", channel_uuid))
+            pipe.get(_live_key("last_data", channel_uuid))
             fields, clients, last_data = pipe.execute()
         except Exception:
             logger.debug("Could not read a channel's state from Redis", exc_info=True)
@@ -219,19 +253,18 @@ class Dispatcharr:
         """
         from core.utils import RedisClient
 
-        base = f"live:channel:{channel_uuid}"
         try:
             client = RedisClient.get_buffer()
             if not client:
                 return None
             stamps = client.zrevrangebyscore(
-                f"{base}:input:buffer:chunk_timestamps", "+inf", not_before, start=0, num=MAX_SAMPLE_CHUNKS, withscores=True
+                _live_key("chunk_timestamps", channel_uuid), "+inf", not_before, start=0, num=MAX_SAMPLE_CHUNKS, withscores=True
             )
             if not stamps:
                 return None
             wanted = seconds + EXTRA_SECONDS
             newest = float(stamps[0][1])
-            cuts = client.zrange(f"{base}:input:buffer:discontinuities", 0, -1)
+            cuts = client.zrange(_live_key("buffer_discontinuities", channel_uuid), 0, -1)
             last_cut = max((_as_int(item) or 0 for item in cuts), default=0)
             indexes = []
             for member, stamp in stamps:
@@ -245,11 +278,11 @@ class Dispatcharr:
                 return None
             pipe = client.pipeline(transaction=False)
             for index in reversed(indexes):
-                pipe.get(f"{base}:input:buffer:chunk:{index}")
+                pipe.get(_live_key("buffer_chunk", channel_uuid, index))
             chunks = pipe.execute()
             if any(chunk is None for chunk in chunks):
                 return None
-            now_on = _as_int(client.hget(f"{base}:metadata", "stream_id"))
+            now_on = _as_int(client.hget(_live_key("channel_metadata", channel_uuid), "stream_id"))
             if now_on != stream_id:
                 return None
             data = b"".join(chunks)

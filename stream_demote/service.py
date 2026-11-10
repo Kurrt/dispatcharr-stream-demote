@@ -31,6 +31,11 @@ RECHECK_SECONDS = 15
 GUARD_BUCKET_SECONDS = 600
 RECENT_FAILURE_SECONDS = 300
 LOG_TRACE_EVERY_SECONDS = 600
+# A session Dispatcharr's events told us about should show up in its live data within a
+# minute or so. Several in a row that don't means the plugin can't see what's playing.
+LIVE_CHECK_MIN_AGE = 90
+LIVE_CHECK_MAX_AGE = 1800
+LIVE_MISSING_LIMIT = 3
 REPORT_DIR = "/data/plugin_reports/stream-demote"
 NUMBER_PATTERN = re.compile(r"^\d{1,6}(\.\d{1,3})?$")
 
@@ -302,8 +307,44 @@ class Service:
             return True
         cfg = engine.Settings(raw)
         self.sweep(cfg)
+        self._check_live_data(now)
         self.content.tick(cfg, self.clock())
         return True
+
+    def _check_live_data(self, now):
+        """Sessions come from Dispatcharr's events, and what they're playing from its live data.
+
+        If that data moves (a Dispatcharr update renaming its keys), every read says nothing is
+        playing: no proof, no samples, no flags, and no error either. A session a minute or two
+        old that the live data knows nothing about is the sign, and a few in a row with none
+        seen in between is the alarm. A missed stop event can leave a stale session, and a restart several, but the first
+        channel seen playing clears it.
+        """
+        try:
+            for session in self.store.all_sessions():
+                age = now - session["since"]
+                if age < LIVE_CHECK_MIN_AGE or age > LIVE_CHECK_MAX_AGE:
+                    continue
+                # Each session is looked at once, so one stale session counts once.
+                if not self.store.claim(f"live_check:{session['channel_uuid']}:{session['since']}", now, 86400):
+                    continue
+                live = self.dp.live_state(session["channel_uuid"])
+                if live is None:
+                    continue
+                if live["running"]:
+                    self.store.release("live_missing")
+                    continue
+                missing, _wait = self.store.hit("live_missing", now, 86400)
+                if missing == LIVE_MISSING_LIMIT:
+                    self.warn("live-data", "Stream Demote can't see what's playing",
+                              "Channels Dispatcharr says are playing don't show up in its live data, so nothing "
+                              "is being checked. A Dispatcharr update may have changed it, so look for a plugin update. "
+                              "Right after a restart this can be a false alarm, and it clears once a channel is seen playing.")
+        except Exception as error:
+            self.note_problem("live check", error)
+
+    def live_data_visible(self, now):
+        return self.store.hits_now("live_missing", now, 86400) < LIVE_MISSING_LIMIT
 
     def _timer_sweep(self):
         try:
@@ -630,6 +671,9 @@ class Service:
             return
         key = session["account_key"]
         cause = f"{engine.CONTENT_PREFIX}{cause_name}"
+        if not cfg.content_act and self.store.journal_seen("content_failed", channel["id"], stream_id, cause, session["since"]):
+            # Report-only keeps sampling, so the same problem would be written once a minute.
+            return
         self.store.add_journal(now, "content_failed", channel["id"], stream_id, key, cause, "content")
         logger.info("Stream %s on channel %s failed a content check: %s", stream_id, channel["number"], cause_name)
         if not cfg.content_act:
@@ -875,11 +919,13 @@ class Service:
         samples = self.store.sample_totals(day)
         pictures = self.store.picture_counts()
         ffmpeg_found = bool(self.content.ready())
+        live_ok = self.live_data_visible(now)
         summary = {
             "dry_run": cfg.dry_run,
             "route_live_on_this_worker": bool(route_live),
             "hand_edits_visible": bool(self.dp.can_see_hand_edits()),
             "background_loop_ok": loop_ok,
+            "live_data_visible": live_ok,
             "errors_last_hour": errors,
             "last_24h": {"journal": counts, "failure_outcomes": outcomes},
             "demoted_now": sum(1 for row in demoted if row["state"] == "demoted"),
@@ -899,10 +945,15 @@ class Service:
         }
         if errors:
             head = f"Something is wrong: {errors} failures in the last hour. Check Dispatcharr's log."
+        elif not live_ok:
+            head = ("Something is wrong: channels that are playing don't show up in Dispatcharr's live data, "
+                    "so nothing is being checked. A Dispatcharr update may have changed it.")
         elif cfg.dry_run:
             head = "Dry run is ON, nothing is being moved."
         else:
             head = "Live: failed streams are being moved."
+        if head.startswith("Something is wrong") and cfg.dry_run:
+            head += " Dry run is ON, nothing is being moved."
         parts = [
             head,
             "Flag route is live." if route_live else "Flag route is NOT live on this worker. Restart Dispatcharr.",

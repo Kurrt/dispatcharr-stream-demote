@@ -65,6 +65,7 @@ class FakeDispatcharr:
         self.no_data = set()
         self.data_since = {}
         self.redis_down = False
+        self.live_hidden = False
         self.broken_rotate = False
         self.hand_edits = {}
         self.hook_live = True
@@ -154,7 +155,7 @@ class FakeDispatcharr:
         if self.redis_down:
             return None
         uuid = str(channel_uuid)
-        stream_id = self.running.get(uuid)
+        stream_id = None if self.live_hidden else self.running.get(uuid)
         last = None
         if stream_id and stream_id not in self.no_data:
             last = self.clock()
